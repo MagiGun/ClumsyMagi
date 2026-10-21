@@ -2,7 +2,7 @@
   <img src="assets/clumsymagi.svg" width="160" height="160" alt="ClumsyMagi Logo" />
   <h1>ClumsyMagi</h1>
   <p><b>A modern, interactive network condition simulator for Windows.</b></p>
-  <p><i>A fork and complete modern rewrite of <b>clumsy 0.3</b> in Rust and egui.</i></p>
+  <p><i>A fork and complete modern rewrite of <a href="https://github.com/jagt/clumsy"><b>clumsy 0.3</b></a> in Rust and egui.</i></p>
 
   <p>
     <img src="https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011%20(x64)-blue.svg" alt="Platform" />
@@ -128,7 +128,7 @@ To compile ClumsyMagi from source:
    ```
 2. Clone the repository:
    ```bash
-   git clone https://github.com/your-username/ClumsyMagi.git
+   git clone https://github.com/uvxszi/ClumsyMagi.git
    cd ClumsyMagi/rust
    ```
 3. Run the unit test suite:
