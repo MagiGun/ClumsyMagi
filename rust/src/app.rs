@@ -39,8 +39,7 @@ pub struct ClumsyMagiApp {
     log_cache: Vec<crate::engine::LogEvent>,
     last_log_refresh: Instant,
 
-    history: Vec<[f64; 3]>, // [t_secs, captured_per_sec, sent_per_sec]
-    history_t: f64,
+    history_samples: Vec<(Instant, f64, f64)>, // (timestamp, captured_per_sec, sent_per_sec)
     last_stats: StatsSnapshot,
     last_sample: Instant,
 
@@ -79,8 +78,7 @@ impl ClumsyMagiApp {
             show_log: true,
             log_cache: Vec::new(),
             last_log_refresh: Instant::now() - Duration::from_secs(1),
-            history: Vec::new(),
-            history_t: 0.0,
+            history_samples: Vec::new(),
             last_stats: StatsSnapshot::default(),
             last_sample: Instant::now(),
             elevated,
@@ -159,8 +157,8 @@ impl ClumsyMagiApp {
 }
 
 impl eframe::App for ClumsyMagiApp {
-    fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = root.ctx().clone();
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
 
         // theme (only poke the context when the preference actually changed)
         if self.applied_theme != Some(self.config.theme) {
@@ -194,10 +192,7 @@ impl eframe::App for ClumsyMagiApp {
         }
         self.maybe_save_config(false);
 
-        // Schedule repaints so the UI stays responsive without requiring mouse movement:
-        // - fast (50ms ~ 20 FPS) when filtering is running for smooth throughput plot & activity dots
-        // - or near the quit deadline if one is set
-        // - low rate (250ms) when idle to check logs and engine state
+        // Schedule repaints so the UI stays responsive without requiring mouse movement
         let repaint_delay = if self.engine.as_ref().map(|e| e.is_running()).unwrap_or(false) {
             Duration::from_millis(50)
         } else if let Some(deadline) = self.quit_deadline {
@@ -207,9 +202,7 @@ impl eframe::App for ClumsyMagiApp {
         };
         ctx.request_repaint_after(repaint_delay);
 
-        self.ui_header(root);
-        self.ui_log_panel(root);
-        self.ui_functions(root);
+        self.ui_main_content(ui);
         self.ui_preset_window(&ctx);
     }
 }
@@ -222,17 +215,28 @@ impl Drop for ClumsyMagiApp {
 }
 
 impl ClumsyMagiApp {
-    // ---------------------------------------------------------------- header
+    fn ui_main_content(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
 
-    fn ui_header(&mut self, root: &mut egui::Ui) {
-        egui::Panel::top("header").show(root, |ui| {
-            ui.add_space(6.0);
+        // 1. Filtering Section
+        self.ui_filtering_section(ui);
 
-            // --- filter row
+        // 2. Functions Section
+        self.ui_functions_section(ui);
+
+        // 3. Activity Section
+        self.ui_activity_section(ui);
+    }
+
+    // ---------------------------------------------------------------- Filtering
+    fn ui_filtering_section(&mut self, ui: &mut egui::Ui) {
+        let running = self.engine.as_ref().map(|e| e.is_running()).unwrap_or(false);
+
+        ui.group(|ui| {
+            ui.set_width(ui.available_width());
+
+            // Header line: Title, Dot, Theme, Elevate
             ui.horizontal(|ui| {
-                let running = self.engine.is_some() && self.engine.as_ref().unwrap().is_running();
-
-                // global send-state dot: green while sending, red on failure
                 let dot_color = match &self.engine {
                     Some(e) => {
                         let now = crate::engine::unix_ms();
@@ -251,9 +255,51 @@ impl ClumsyMagiApp {
                     None => idle_color(ui),
                 };
                 draw_dot(ui, dot_color);
+                ui.label(egui::RichText::new("Filtering").strong());
 
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let next = match self.config.theme {
+                        Theme::Dark => Theme::Light,
+                        Theme::Light => Theme::System,
+                        Theme::System => Theme::Dark,
+                    };
+                    let (icon, label) = match next {
+                        Theme::Light => ("☀", "Light"),
+                        Theme::Dark => ("🌙", "Dark"),
+                        Theme::System => ("💻", "System"),
+                    };
+                    if ui.button(format!("{icon} {label}")).on_hover_text("Toggle theme").clicked() {
+                        self.config.theme = next;
+                        self.mark_dirty();
+                    }
+
+                    if !self.elevated {
+                        if ui.button(egui::RichText::new("🛡 Elevate").color(warn_color(ui))).on_hover_text("Restart as Administrator").clicked() {
+                            let args = vec!["--elevated-relaunch".to_string()];
+                            let _ = crate::platform::relaunch_elevated(&args);
+                            self.maybe_save_config(true);
+                            std::process::exit(0);
+                        }
+                    }
+                });
+            });
+
+            // Filter Text Edit: full width
+            let filter_edit = egui::TextEdit::singleline(&mut self.config.filter)
+                .hint_text("WinDivert filter expression, e.g. outbound and loopback")
+                .desired_width(f32::INFINITY);
+            let response = ui.add_enabled(!running, filter_edit);
+            if response.changed() {
+                self.mark_dirty();
+                self.preset_selected = usize::MAX;
+            }
+
+            // Controls Row: Start/Stop, Presets, Save
+            ui.horizontal(|ui| {
                 let btn_text = if running { "Stop" } else { "Start" };
-                let btn = egui::Button::new(egui::RichText::new(btn_text).strong());
+                let btn_color = if running { error_color(ui) } else { ok_color(ui) };
+                let btn = egui::Button::new(egui::RichText::new(btn_text).strong().size(13.0).color(btn_color))
+                    .min_size(egui::vec2(60.0, 22.0));
                 if ui.add(btn).clicked() {
                     if running {
                         self.stop_filtering();
@@ -262,30 +308,25 @@ impl ClumsyMagiApp {
                     }
                 }
 
-                let filter_edit = egui::TextEdit::singleline(&mut self.config.filter)
-                    .hint_text("WinDivert filter, e.g. udp and outbound")
-                    .desired_width(ui.available_width() - 240.0);
-                let response = ui.add_enabled(!running, filter_edit);
-                if response.changed() {
-                    self.mark_dirty();
-                    self.preset_selected = usize::MAX;
-                }
+                ui.separator();
 
-                // presets dropdown and save button (disabled while filtering)
                 ui.add_enabled_ui(!running, |ui| {
+                    ui.label("Presets:");
                     let preset_names: Vec<String> = self.config.presets.iter().map(|p| p.name.clone()).collect();
                     let selected_text = if self.preset_selected < preset_names.len() {
                         preset_names[self.preset_selected].clone()
                     } else {
-                        "custom".to_string()
+                        "Custom...".to_string()
                     };
                     egui::ComboBox::from_id_salt("presets")
+                        .width(220.0)
                         .selected_text(selected_text)
                         .show_ui(ui, |ui| {
                             for (i, name) in preset_names.iter().enumerate() {
                                 ui.selectable_value(&mut self.preset_selected, i, name);
                             }
                         });
+
                     if self.preset_selected != usize::MAX {
                         if let Some(preset) = self.config.presets.get(self.preset_selected) {
                             let f = preset.filter.clone();
@@ -295,350 +336,333 @@ impl ClumsyMagiApp {
                             }
                         }
                     }
-                    if ui.button("Save preset").clicked() {
+
+                    if ui.button("Save...").on_hover_text("Save current filter as a preset").clicked() {
                         self.preset_window_open = true;
                         self.preset_name_edit.clear();
                     }
                 });
-
-                // theme toggle
-                let next = match self.config.theme {
-                    Theme::Dark => Theme::Light,
-                    Theme::Light => Theme::System,
-                    Theme::System => Theme::Dark,
-                };
-                let theme_label = match next {
-                    Theme::Light => "Light",
-                    Theme::Dark => "Dark",
-                    Theme::System => "System",
-                };
-                if ui
-                    .button(format!("Theme: {theme_label}"))
-                    .on_hover_text("Switch between dark, light, and system theme")
-                    .clicked()
-                {
-                    self.config.theme = next;
-                    self.mark_dirty();
-                }
             });
 
-            // --- filter validation error / status
-            ui.horizontal(|ui| {
-                if let Err(e) = &self.filter_validation {
-                    ui.colored_label(error_color(ui), format!("⚠ {e}"));
-                }
-            });
-
-            // --- status line
-            ui.horizontal(|ui| {
-                if !self.status.is_empty() {
-                    if self.status_error {
-                        ui.colored_label(error_color(ui), &self.status);
-                    } else {
-                        ui.label(&self.status);
-                    }
-                } else if !self.elevated {
-                    ui.colored_label(
-                        warn_color(ui),
-                        "⚠ Not running as Administrator: filtering will fail. Use the button below to elevate.",
-                    );
+            // Status message
+            if let Err(e) = &self.filter_validation {
+                ui.colored_label(error_color(ui), format!("⚠ {e}"));
+            } else if !self.status.is_empty() {
+                if self.status_error {
+                    ui.colored_label(error_color(ui), format!("⚠ {}", self.status));
                 } else {
-                    ui.label(
-                        egui::RichText::new(
-                            "NOTICE: loopback packets can only be captured with 'outbound' (e.g. 'udp and outbound'), \
-                             never with inbound criteria.",
-                        )
-                        .weak()
-                        .small(),
-                    );
+                    ui.label(&self.status);
                 }
-            });
-
-            // --- elevation banner
-            if !self.elevated {
-                ui.horizontal(|ui| {
-                    if ui.button("🛡 Restart as Administrator").clicked() {
-                        let args = vec!["--elevated-relaunch".to_string()];
-                        match crate::platform::relaunch_elevated(&args) {
-                            Ok(()) => {
-                                // new instance takes over; save config and exit
-                                self.maybe_save_config(true);
-                                std::process::exit(0);
-                            }
-                            Err(e) => self.set_status(e, true),
-                        }
-                    }
-                });
+            } else if !self.elevated {
+                ui.colored_label(warn_color(ui), "⚠ Not running as Administrator: WinDivert requires admin privileges to capture packets.");
+            } else {
+                ui.label(egui::RichText::new("Notice: loopback packets must use 'outbound' criteria (e.g. 'udp and outbound and loopback').").weak().small());
             }
-
-            ui.add_space(4.0);
         });
     }
 
-    // ---------------------------------------------------------------- functions
-
-    fn ui_functions(&mut self, root: &mut egui::Ui) {
-        egui::CentralPanel::default().show(root, |ui| {
-            ui.heading("Functions");
-            ui.add_space(2.0);
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for kind in crate::engine::all_modules() {
-                    let params = self.params[kind.index()].clone();
-                    self.module_row(ui, *kind, &params);
-                    ui.add_space(4.0);
-                }
+    // ---------------------------------------------------------------- Functions
+    fn ui_functions_section(&mut self, ui: &mut egui::Ui) {
+        ui.group(|ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Functions").strong());
+                ui.weak("Enable functionalities to take effect in real-time.");
             });
+            ui.add_space(2.0);
+
+            for kind in crate::engine::all_modules() {
+                let params = self.params[kind.index()].clone();
+                self.module_row(ui, *kind, &params);
+            }
         });
     }
 
     fn module_row(&mut self, ui: &mut egui::Ui, kind: ModuleKind, params: &Arc<ModuleParams>) {
-        ui.group(|ui| {
-            ui.horizontal_wrapped(|ui| {
-                // activity dot
-                let active = match &self.engine {
-                    Some(e) => match e.shared.since_triggered(kind) {
-                        Some(ms) => ms < ACTIVITY_WINDOW_MS as u64,
-                        None => false,
-                    },
+        ui.horizontal(|ui| {
+            // Activity indicator dot (fixed size)
+            let active = match &self.engine {
+                Some(e) => match e.shared.since_triggered(kind) {
+                    Some(ms) => ms < ACTIVITY_WINDOW_MS as u64,
                     None => false,
-                };
-                draw_dot(ui, if active { ok_color(ui) } else { idle_color(ui) });
+                },
+                None => false,
+            };
+            draw_dot(ui, if active { ok_color(ui) } else { idle_color(ui) });
 
-                let mut enabled = params.enabled.load(Ordering::Relaxed);
-                if ui
-                    .checkbox(&mut enabled, kind.display_name())
-                    .changed()
-                {
+            // Checkbox with fixed width for column alignment
+            let mut enabled = params.enabled.load(Ordering::Relaxed);
+            ui.allocate_ui(egui::vec2(105.0, 18.0), |ui| {
+                if ui.checkbox(&mut enabled, kind.display_name()).changed() {
                     params.enabled.store(enabled, Ordering::Relaxed);
                     self.mark_dirty();
                 }
+            });
 
-                ui.separator();
+            // Controls dimmed when not enabled
+            ui.add_enabled_ui(enabled, |ui| {
                 self.module_controls(ui, kind, params);
             });
         });
     }
 
     fn module_controls(&mut self, ui: &mut egui::Ui, kind: ModuleKind, params: &Arc<ModuleParams>) {
-        // direction toggles helper
-        macro_rules! direction_toggles {
-            () => {{
-                let mut inbound = params.direction.inbound.load(Ordering::Relaxed);
-                let mut outbound = params.direction.outbound.load(Ordering::Relaxed);
-                if ui.checkbox(&mut inbound, "Inbound").changed() {
-                    params.direction.inbound.store(inbound, Ordering::Relaxed);
-                    self.mark_dirty();
-                }
-                if ui.checkbox(&mut outbound, "Outbound").changed() {
-                    params.direction.outbound.store(outbound, Ordering::Relaxed);
-                    self.mark_dirty();
-                }
-            }};
+        // Direction toggles (compact: In / Out)
+        let mut inbound = params.direction.inbound.load(Ordering::Relaxed);
+        let mut outbound = params.direction.outbound.load(Ordering::Relaxed);
+        if ui.checkbox(&mut inbound, "In").on_hover_text("Process inbound packets").changed() {
+            params.direction.inbound.store(inbound, Ordering::Relaxed);
+            self.mark_dirty();
+        }
+        if ui.checkbox(&mut outbound, "Out").on_hover_text("Process outbound packets").changed() {
+            params.direction.outbound.store(outbound, Ordering::Relaxed);
+            self.mark_dirty();
         }
 
-        macro_rules! chance_control {
-            () => {{
+        ui.separator();
+
+        match kind {
+            ModuleKind::Lag => {
+                ui.label("Delay:");
+                let mut delay = params.delay_ms.load(Ordering::Relaxed);
+                if ui
+                    .add(egui::DragValue::new(&mut delay).speed(5.0).range(0..=15000).suffix("ms"))
+                    .changed()
+                {
+                    params.delay_ms.store(delay, Ordering::Relaxed);
+                    self.mark_dirty();
+                }
+            }
+            ModuleKind::Drop => {
                 ui.label("Chance:");
                 let mut pct = params.chance_percent();
                 if ui
-                    .add(
-                        egui::DragValue::new(&mut pct)
-                            .speed(0.1)
-                            .range(0.0..=100.0)
-                            .suffix("%")
-                            .max_decimals(1),
-                    )
+                    .add(egui::DragValue::new(&mut pct).speed(0.1).range(0.0..=100.0).suffix("%").max_decimals(1))
                     .changed()
                 {
                     params.set_chance_percent(pct);
                     self.mark_dirty();
                 }
-            }};
-        }
-
-        macro_rules! int_control {
-            ($label:expr, $field:ident, $min:literal, $max:literal) => {{
-                ui.label($label);
-                let mut v = params.$field.load(Ordering::Relaxed);
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut v)
-                            .range($min..=$max)
-                            .suffix(if stringify!($field).contains("ms") { "ms" } else { "" }),
-                    )
-                    .changed()
-                {
-                    params.$field.store(v, Ordering::Relaxed);
-                    self.mark_dirty();
-                }
-            }};
-        }
-
-        match kind {
-            ModuleKind::Lag => {
-                direction_toggles!();
-                int_control!("Delay:", delay_ms, 0, 15000);
-            }
-            ModuleKind::Drop => {
-                direction_toggles!();
-                chance_control!();
             }
             ModuleKind::Throttle => {
+                ui.label("Time:");
+                let mut frame = params.throttle_frame_ms.load(Ordering::Relaxed);
+                if ui
+                    .add(egui::DragValue::new(&mut frame).speed(2.0).range(0..=1000).suffix("ms"))
+                    .changed()
+                {
+                    params.throttle_frame_ms.store(frame, Ordering::Relaxed);
+                    self.mark_dirty();
+                }
                 let mut drop_t = params.drop_throttled.load(Ordering::Relaxed);
-                if ui.checkbox(&mut drop_t, "Drop Throttled").changed() {
+                if ui.checkbox(&mut drop_t, "Drop").on_hover_text("Drop throttled packets instead of sending").changed() {
                     params.drop_throttled.store(drop_t, Ordering::Relaxed);
                     self.mark_dirty();
                 }
-                int_control!("Timeframe:", throttle_frame_ms, 0, 1000);
-                direction_toggles!();
-                chance_control!();
+                ui.label("Chance:");
+                let mut pct = params.chance_percent();
+                if ui
+                    .add(egui::DragValue::new(&mut pct).speed(0.1).range(0.0..=100.0).suffix("%").max_decimals(1))
+                    .changed()
+                {
+                    params.set_chance_percent(pct);
+                    self.mark_dirty();
+                }
             }
             ModuleKind::Duplicate => {
-                int_control!("Count:", dup_count, 2, 50);
-                direction_toggles!();
-                chance_control!();
+                ui.label("Count:");
+                let mut count = params.dup_count.load(Ordering::Relaxed);
+                if ui.add(egui::DragValue::new(&mut count).speed(0.2).range(2..=50)).changed() {
+                    params.dup_count.store(count, Ordering::Relaxed);
+                    self.mark_dirty();
+                }
+                ui.label("Chance:");
+                let mut pct = params.chance_percent();
+                if ui
+                    .add(egui::DragValue::new(&mut pct).speed(0.1).range(0.0..=100.0).suffix("%").max_decimals(1))
+                    .changed()
+                {
+                    params.set_chance_percent(pct);
+                    self.mark_dirty();
+                }
             }
             ModuleKind::Ood => {
-                direction_toggles!();
-                chance_control!();
+                ui.label("Chance:");
+                let mut pct = params.chance_percent();
+                if ui
+                    .add(egui::DragValue::new(&mut pct).speed(0.1).range(0.0..=100.0).suffix("%").max_decimals(1))
+                    .changed()
+                {
+                    params.set_chance_percent(pct);
+                    self.mark_dirty();
+                }
             }
             ModuleKind::Tamper => {
                 let mut redo = params.redo_checksum.load(Ordering::Relaxed);
-                if ui.checkbox(&mut redo, "Redo Checksum").changed() {
+                if ui.checkbox(&mut redo, "Redo Checksum").on_hover_text("Recompute checksums after tampering").changed() {
                     params.redo_checksum.store(redo, Ordering::Relaxed);
                     self.mark_dirty();
                 }
-                direction_toggles!();
-                chance_control!();
+                ui.label("Chance:");
+                let mut pct = params.chance_percent();
+                if ui
+                    .add(egui::DragValue::new(&mut pct).speed(0.1).range(0.0..=100.0).suffix("%").max_decimals(1))
+                    .changed()
+                {
+                    params.set_chance_percent(pct);
+                    self.mark_dirty();
+                }
             }
             ModuleKind::Reset => {
                 let enabled = params.enabled.load(Ordering::Relaxed);
                 if ui
-                    .add_enabled(enabled, egui::Button::new("RST next packet"))
-                    .on_hover_text("Force a TCP RST on the next matching packet (only while enabled)")
+                    .add_enabled(enabled, egui::Button::new("RST next").small())
+                    .on_hover_text("Force a TCP RST on the next matching packet")
                     .clicked()
                 {
                     params.rst_next.fetch_add(1, Ordering::Relaxed);
                 }
-                direction_toggles!();
-                chance_control!();
+                ui.label("Chance:");
+                let mut pct = params.chance_percent();
+                if ui
+                    .add(egui::DragValue::new(&mut pct).speed(0.1).range(0.0..=100.0).suffix("%").max_decimals(1))
+                    .changed()
+                {
+                    params.set_chance_percent(pct);
+                    self.mark_dirty();
+                }
             }
             ModuleKind::Bandwidth => {
-                direction_toggles!();
-                int_control!("Limit(KB/s):", bandwidth_limit_kbps, 0, 99999);
+                ui.label("Limit:");
+                let mut limit = params.bandwidth_limit_kbps.load(Ordering::Relaxed);
+                if ui
+                    .add(egui::DragValue::new(&mut limit).speed(10.0).range(0..=99999).suffix(" KB/s"))
+                    .changed()
+                {
+                    params.bandwidth_limit_kbps.store(limit, Ordering::Relaxed);
+                    self.mark_dirty();
+                }
             }
         }
     }
 
-    // ---------------------------------------------------------------- log panel
-
-    fn ui_log_panel(&mut self, root: &mut egui::Ui) {
+    // ---------------------------------------------------------------- Activity
+    fn ui_activity_section(&mut self, ui: &mut egui::Ui) {
         let stats = self
             .engine
             .as_ref()
             .map(|e| e.shared.stats.snapshot())
             .unwrap_or_default();
 
-        egui::Panel::bottom("log_panel")
-            .resizable(true)
-            .default_size(200.0)
-            .min_size(64.0)
-            .show(root, |ui| {
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    let chevron = if self.show_log { "▾" } else { "▸" };
-                    if ui.button(format!("{chevron} Activity")).clicked() {
-                        self.show_log = !self.show_log;
-                        self.mark_dirty();
-                    }
-                    ui.separator();
-                    ui.label(format!(
-                        "Captured {} · Sent {} · Dropped {} · Modified {} · Send failed {}",
-                        stats.captured, stats.sent, stats.dropped, stats.modified, stats.send_failed
-                    ));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Clear").clicked() {
-                            if let Some(e) = &self.engine {
-                                e.shared.log.clear();
-                            }
-                            self.log_cache.clear();
-                        }
-                        if ui.button("Copy").on_hover_text("Copy the whole event log").clicked() {
-                            let text = self
-                                .log_cache
-                                .iter()
-                                .map(|e| format_log_line(e))
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            ui.ctx().copy_text(text);
-                        }
-                    });
-                });
+        ui.group(|ui| {
+            ui.set_width(ui.available_width());
 
-                if self.show_log {
-                    ui.add_space(4.0);
-                    self.ui_throughput_plot(ui);
-
-                    ui.add_space(4.0);
-                    egui::ScrollArea::vertical()
-                        .stick_to_bottom(true)
-                        .auto_shrink(false)
-                        .show(ui, |ui| {
-                            egui::Grid::new("log_grid")
-                                .num_columns(3)
-                                .striped(true)
-                                .min_col_width(0.0)
-                                .show(ui, |ui| {
-                                    for ev in &self.log_cache {
-                                        let t = format_unix_ms(ev.unix_ms);
-                                        ui.monospace(t);
-                                        ui.monospace(
-                                            ev.module
-                                                .map(|m| m.display_name().to_string())
-                                                .unwrap_or_else(|| "engine".into()),
-                                        );
-                                        let color = match ev.level {
-                                            crate::engine::LogLevel::Info => ui.visuals().text_color(),
-                                            crate::engine::LogLevel::Traffic => ok_color(ui),
-                                            crate::engine::LogLevel::Warn => warn_color(ui),
-                                            crate::engine::LogLevel::Error => error_color(ui),
-                                        };
-                                        ui.colored_label(color, &ev.text);
-                                        ui.end_row();
-                                    }
-                                });
-                        });
+            // Header line with collapse button and stats summary
+            ui.horizontal(|ui| {
+                let chevron = if self.show_log { "▾" } else { "▸" };
+                if ui.button(format!("{chevron} Activity")).clicked() {
+                    self.show_log = !self.show_log;
+                    self.mark_dirty();
                 }
-                ui.add_space(2.0);
+
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Cap: {} · Sent: {} · Drop: {} · Mod: {} · Fail: {}",
+                        stats.captured, stats.sent, stats.dropped, stats.modified, stats.send_failed
+                    )).monospace().size(11.0)
+                );
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Clear").on_hover_text("Clear event log").clicked() {
+                        if let Some(e) = &self.engine {
+                            e.shared.log.clear();
+                        }
+                        self.log_cache.clear();
+                    }
+                    if ui.button("Copy").on_hover_text("Copy activity log").clicked() {
+                        let text = self
+                            .log_cache
+                            .iter()
+                            .map(|e| format_log_line(e))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        ui.ctx().copy_text(text);
+                    }
+                });
             });
+
+            if self.show_log {
+                ui.add_space(2.0);
+
+                // Fixed-height, non-jittering throughput plot
+                self.ui_throughput_plot(ui);
+
+                ui.add_space(2.0);
+
+                // Log table
+                egui::ScrollArea::vertical()
+                    .max_height(100.0)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        egui::Grid::new("log_grid")
+                            .num_columns(3)
+                            .striped(true)
+                            .spacing([8.0, 2.0])
+                            .show(ui, |ui| {
+                                for ev in &self.log_cache {
+                                    let t = format_unix_ms(ev.unix_ms);
+                                    ui.monospace(&t);
+                                    ui.monospace(
+                                        ev.module
+                                            .map(|m| m.display_name().to_string())
+                                            .unwrap_or_else(|| "engine".into()),
+                                    );
+                                    let color = match ev.level {
+                                        crate::engine::LogLevel::Info => ui.visuals().text_color(),
+                                        crate::engine::LogLevel::Traffic => ok_color(ui),
+                                        crate::engine::LogLevel::Warn => warn_color(ui),
+                                        crate::engine::LogLevel::Error => error_color(ui),
+                                    };
+                                    ui.colored_label(color, &ev.text);
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            }
+        });
     }
 
     fn ui_throughput_plot(&mut self, ui: &mut egui::Ui) {
-        if self.history.len() < 2 {
-            ui.set_min_height(70.0);
-            ui.weak("waiting for traffic…");
-            return;
-        }
-        let captured: PlotPoints = self
-            .history
-            .iter()
-            .map(|p| [p[0], p[1]])
-            .collect::<Vec<[f64; 2]>>()
-            .into();
-        let sent: PlotPoints = self
-            .history
-            .iter()
-            .map(|p| [p[0], p[2]])
-            .collect::<Vec<[f64; 2]>>()
-            .into();
+        let now = Instant::now();
+        let mut captured_pts = Vec::with_capacity(self.history_samples.len() + 1);
+        let mut sent_pts = Vec::with_capacity(self.history_samples.len() + 1);
 
-        let line_captured = Line::new("captured/s", captured).stroke(egui::Stroke::new(1.5, ok_color(ui)));
-        let line_sent =
-            Line::new("sent/s", sent).stroke(egui::Stroke::new(1.5, ui.visuals().strong_text_color()));
+        for (t, cap, sent) in &self.history_samples {
+            let x = -(now.duration_since(*t).as_secs_f64());
+            captured_pts.push([x, *cap]);
+            sent_pts.push([x, *sent]);
+        }
+        if captured_pts.is_empty() {
+            captured_pts.push([-30.0, 0.0]);
+            captured_pts.push([0.0, 0.0]);
+            sent_pts.push([-30.0, 0.0]);
+            sent_pts.push([0.0, 0.0]);
+        }
+
+        let line_captured = Line::new("captured/s", PlotPoints::from(captured_pts))
+            .stroke(egui::Stroke::new(1.5, ok_color(ui)));
+        let line_sent = Line::new("sent/s", PlotPoints::from(sent_pts))
+            .stroke(egui::Stroke::new(1.5, ui.visuals().strong_text_color()));
+
         Plot::new("throughput")
-            .legend(Legend::default())
-            .height(90.0)
+            .legend(Legend::default().position(egui_plot::Corner::LeftTop))
+            .height(80.0)
             .show_axes([false, true])
+            .include_x(-30.0)
+            .include_x(0.0)
+            .include_y(0.0)
+            .include_y(10.0)
             .allow_drag(false)
             .allow_zoom(false)
             .allow_scroll(false)
@@ -661,18 +685,8 @@ impl ClumsyMagiApp {
             .unwrap_or_default();
         let cap_rate = (stats.captured.saturating_sub(self.last_stats.captured)) as f64 / dt;
         let sent_rate = (stats.sent.saturating_sub(self.last_stats.sent)) as f64 / dt;
-        self.history_t += dt;
-        self.history.push([self.history_t, cap_rate, sent_rate]);
-        // keep the last ~30 seconds (at 4Hz => 120 points); rebase t to zero
-        // so the x axis stays bounded
-        while self.history.len() > 120 {
-            self.history.remove(0);
-        }
-        let t0 = self.history[0][0];
-        for p in self.history.iter_mut() {
-            p[0] -= t0;
-        }
-        self.history_t -= t0;
+        self.history_samples.push((now, cap_rate, sent_rate));
+        self.history_samples.retain(|(t, _, _)| now.duration_since(*t).as_secs_f64() <= 30.0);
         self.last_stats = stats;
         self.last_sample = now;
     }

@@ -85,8 +85,8 @@ fn main() {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(format!("ClumsyMagi {}", app::VERSION))
-            .with_inner_size([920.0, 740.0])
-            .with_min_inner_size([720.0, 480.0])
+            .with_inner_size([580.0, 680.0])
+            .with_min_inner_size([520.0, 520.0])
             .with_icon(Arc::new(load_icon())),
         ..Default::default()
     };
