@@ -11,7 +11,7 @@ const WINDIVERT_DIR: &str = "../external/WinDivert-2.2.0-C";
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=assets/clumsy-icon.ico");
+    println!("cargo:rerun-if-changed=assets/clumsymagi.ico");
 
     embed_icon();
 
@@ -29,18 +29,12 @@ fn main() {
         _ => "x64",
     };
     copy_windivert(Path::new(WINDIVERT_DIR).join(arch_dir), &target_dir);
-
-    let config_src = Path::new("../etc/config.txt");
-    let config_dst = target_dir.join("config.txt");
-    if config_src.exists() && need_copy(config_src, &config_dst) {
-        let _ = std::fs::copy(config_src, &config_dst);
-    }
 }
 
 fn embed_icon() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         if let Err(e) = winresource::WindowsResource::new()
-            .set_icon("assets/clumsy-icon.ico")
+            .set_icon("assets/clumsymagi.ico")
             .set("FileDescription", "ClumsyMagi - network condition simulator")
             .set("ProductName", "ClumsyMagi")
             .compile()

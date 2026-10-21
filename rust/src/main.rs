@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn load_icon() -> egui::IconData {
-    let png = include_bytes!("../assets/clumsy-icon.png");
+    let png = include_bytes!("../assets/clumsymagi.png");
     let img = image::load_from_memory(png).expect("embedded icon should decode");
     let rgba = img.to_rgba8();
     egui::IconData {
