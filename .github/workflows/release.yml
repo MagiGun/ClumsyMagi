@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag (e.g. v0.4.0) - leave empty to skip publishing a GitHub Release'
+        required: false
+        default: ''
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build Windows Release
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'rust -> target'
+
+      - name: Run unit tests
+        run: cargo test --manifest-path rust/Cargo.toml
+
+      - name: Build release binary
+        run: cargo build --manifest-path rust/Cargo.toml --release
+
+      - name: Verify build outputs
+        shell: pwsh
+        run: |
+          $exe = "rust/target/release/clumsymagi.exe"
+          $dll = "rust/target/release/WinDivert.dll"
+          $sys = "rust/target/release/WinDivert64.sys"
+          if (!(Test-Path $exe) -or !(Test-Path $dll) -or !(Test-Path $sys)) {
+            Write-Error "Required release files are missing from rust/target/release/!"
+            exit 1
+          }
+          Write-Host "All required binaries and drivers present."
+
+      - name: Package Release
+        shell: pwsh
+        run: |
+          $packageDir = "ClumsyMagi"
+          New-Item -ItemType Directory -Path $packageDir
+          Copy-Item "rust/target/release/clumsymagi.exe" -Destination $packageDir/
+          Copy-Item "rust/target/release/WinDivert.dll" -Destination $packageDir/
+          Copy-Item "rust/target/release/WinDivert64.sys" -Destination $packageDir/
+          Copy-Item "README.md" -Destination $packageDir/
+          Copy-Item "LICENSE" -Destination $packageDir/
+          Compress-Archive -Path $packageDir -DestinationPath "clumsymagi-windows-x86_64.zip" -Force
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: clumsymagi-windows-x86_64
+          path: |
+            clumsymagi-windows-x86_64.zip
+            rust/target/release/clumsymagi.exe
+            rust/target/release/WinDivert.dll
+            rust/target/release/WinDivert64.sys
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          files: clumsymagi-windows-x86_64.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

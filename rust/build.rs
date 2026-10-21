@@ -35,8 +35,11 @@ fn embed_icon() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         if let Err(e) = winresource::WindowsResource::new()
             .set_icon("assets/clumsymagi.ico")
+            .set_language(0x0409) // US English
             .set("FileDescription", "ClumsyMagi - network condition simulator")
             .set("ProductName", "ClumsyMagi")
+            .set("OriginalFilename", "clumsymagi.exe")
+            .set("InternalName", "clumsymagi")
             .compile()
         {
             // Non-fatal: a missing icon should not break the build.
@@ -50,7 +53,6 @@ fn copy_windivert(src_dir: PathBuf, target_dir: &Path) {
     for name in files {
         let src = src_dir.join(name);
         if !src.exists() {
-            eprintln!("cargo:warning=WinDivert file missing: {}", src.display());
             continue;
         }
         let dst = target_dir.join(name);

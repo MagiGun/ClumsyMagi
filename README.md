@@ -141,6 +141,17 @@ To build ClumsyMagi from source:
 
 ---
 
+## 🚀 GitHub Actions & Automated Releases
+
+ClumsyMagi includes pre-configured GitHub Actions workflows in `.github/workflows/`:
+
+- **CI (`ci.yml`)**: Automatically runs code checks and the full test suite on pushes and pull requests to `master` / `main`.
+- **Release (`release.yml`)**: Builds the optimized Windows 64-bit release, embeds the application icon, packages `clumsymagi.exe`, `WinDivert.dll`, `WinDivert64.sys`, `README.md`, and `LICENSE` into a `clumsymagi-windows-x86_64.zip` archive.
+  - **Manual Trigger**: Go to **Actions** → **Release** → **Run workflow**. You can optionally specify a release tag (e.g., `v0.4.0`) to publish a GitHub Release or leave it blank to build and upload the zipped artifact.
+  - **Tag Trigger**: Pushing any tag starting with `v` (e.g. `git tag v0.4.0 && git push origin v0.4.0`) automatically builds, packages, and publishes a new GitHub Release with attached binaries.
+
+---
+
 ## 📜 WinDivert Filter Reference
 
 WinDivert filters use a simple syntax:

@@ -11,6 +11,12 @@ obj_gmake
 
 # Rust build artifacts
 /rust/target/
+*.exe
+*.dll
+*.sys
+*.zip
+!external/WinDivert*/**/*.dll
+!external/WinDivert*/**/*.sys
 
 # IDE
 .idea/
