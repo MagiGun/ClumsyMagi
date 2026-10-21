@@ -8,3 +8,9 @@ etc/clumsy.aps
 obj_vs
 obj_ninja
 obj_gmake
+
+# Rust build artifacts
+/rust/target/
+
+# IDE
+.idea/

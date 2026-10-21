@@ -1,0 +1,2 @@
+[toolchain]
+channel = "1.99.0-x86_64-pc-windows-msvc"
