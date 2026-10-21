@@ -443,7 +443,11 @@ impl ClumsyMagiApp {
                     // 3. Elevate button (visible only when not already running as Administrator)
                     if !self.elevated {
                         if ui.button(egui::RichText::new("🛡 Elevate").color(warn_color(ui))).on_hover_text("Restart as Administrator").clicked() {
-                            let args = vec!["--elevated-relaunch".to_string()];
+                            let mut args = vec!["--elevated-relaunch".to_string()];
+                            if let Some(rect) = ui.ctx().input(|i| i.viewport().outer_rect) {
+                                args.push("--window-pos".to_string());
+                                args.push(format!("{},{}", rect.min.x.round() as i32, rect.min.y.round() as i32));
+                            }
                             let _ = crate::platform::relaunch_elevated(&args);
                             self.maybe_save_config(true);
                             std::process::exit(0);

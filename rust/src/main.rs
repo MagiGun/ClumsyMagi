@@ -89,11 +89,16 @@ fn main() {
         app.start_filtering();
     }
 
+    let initial_pos = cli
+        .window_pos
+        .unwrap_or_else(|| platform::get_centered_window_position(580.0, 680.0));
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(format!("ClumsyMagi {}", app::VERSION))
             .with_inner_size([580.0, 680.0])
             .with_min_inner_size([520.0, 520.0])
+            .with_position(initial_pos)
             .with_icon(Arc::new(load_icon())),
         ..Default::default()
     };

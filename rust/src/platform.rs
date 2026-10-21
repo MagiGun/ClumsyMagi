@@ -352,6 +352,141 @@ pub fn toggle_console() -> bool {
     }
 }
 
+// ---------------------------------------------------------------- screen & window centering
+
+pub const SPI_GETWORKAREA: u32 = 0x0030;
+pub const SM_CXSCREEN: i32 = 0;
+pub const SM_CYSCREEN: i32 = 1;
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct RECT {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct POINT {
+    pub x: i32,
+    pub y: i32,
+}
+
+#[repr(C)]
+pub struct MONITORINFO {
+    pub cbSize: u32,
+    pub rcMonitor: RECT,
+    pub rcWork: RECT,
+    pub dwFlags: u32,
+}
+
+pub const MONITOR_DEFAULTTOPRIMARY: u32 = 0x00000001;
+
+#[link(name = "user32")]
+extern "system" {
+    fn SystemParametersInfoW(
+        uiAction: u32,
+        uiParam: u32,
+        pvParam: *mut c_void,
+        fWinIni: u32,
+    ) -> i32;
+    fn GetSystemMetrics(nIndex: i32) -> i32;
+    fn GetCursorPos(lpPoint: *mut POINT) -> i32;
+    fn MonitorFromPoint(pt: POINT, dwFlags: u32) -> *mut c_void;
+    fn GetMonitorInfoW(hMonitor: *mut c_void, lpmi: *mut MONITORINFO) -> i32;
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetModuleHandleW(lpModuleName: *const u16) -> *mut c_void;
+    fn GetProcAddress(hModule: *mut c_void, lpProcName: *const u8) -> *mut c_void;
+}
+
+/// Dynamically query GetDpiForSystem from user32.dll (supported on Win10 1607+),
+/// gracefully falling back to standard 96 DPI (100% scale) on older systems.
+pub fn get_system_dpi() -> u32 {
+    unsafe {
+        let user32 = wide("user32.dll");
+        let hmod = GetModuleHandleW(user32.as_ptr());
+        if !hmod.is_null() {
+            let proc_name = b"GetDpiForSystem\0";
+            let proc = GetProcAddress(hmod, proc_name.as_ptr());
+            if !proc.is_null() {
+                let func: extern "system" fn() -> u32 = std::mem::transmute(proc);
+                let dpi = func();
+                if dpi > 0 {
+                    return dpi;
+                }
+            }
+        }
+        96
+    }
+}
+
+/// Returns the active monitor's work area rectangle (excluding taskbars / appbars) in pixels.
+/// Detects the monitor containing the mouse cursor (or primary display monitor),
+/// falling back to SystemParametersInfoW / GetSystemMetrics if unavailable.
+pub fn get_active_work_area() -> RECT {
+    let mut pt = POINT::default();
+    if unsafe { GetCursorPos(&mut pt) } != 0 {
+        let hmon = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY) };
+        if !hmon.is_null() {
+            let mut mi = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                rcMonitor: RECT::default(),
+                rcWork: RECT::default(),
+                dwFlags: 0,
+            };
+            if unsafe { GetMonitorInfoW(hmon, &mut mi) } != 0 {
+                if mi.rcWork.right > mi.rcWork.left && mi.rcWork.bottom > mi.rcWork.top {
+                    return mi.rcWork;
+                }
+            }
+        }
+    }
+
+    let mut rect = RECT::default();
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            &mut rect as *mut RECT as *mut c_void,
+            0,
+        )
+    };
+    if ok != 0 && rect.right > rect.left && rect.bottom > rect.top {
+        rect
+    } else {
+        let w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+        let h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+        RECT {
+            left: 0,
+            top: 0,
+            right: if w > 0 { w } else { 1920 },
+            bottom: if h > 0 { h } else { 1080 },
+        }
+    }
+}
+
+/// Calculates the centered position [x, y] for a window of the given size in logical points,
+/// taking into account the active work area (avoiding taskbar obstruction) and system DPI scale.
+pub fn get_centered_window_position(width: f32, height: f32) -> [f32; 2] {
+    let dpi = get_system_dpi();
+    let scale = if dpi > 0 { dpi as f32 / 96.0 } else { 1.0 };
+
+    let work = get_active_work_area();
+    let work_left = work.left as f32 / scale;
+    let work_top = work.top as f32 / scale;
+    let work_w = (work.right - work.left).max(1) as f32 / scale;
+    let work_h = (work.bottom - work.top).max(1) as f32 / scale;
+
+    let x = work_left + ((work_w - width) * 0.5).max(0.0);
+    let y = work_top + ((work_h - height) * 0.5).max(0.0);
+    [x, y]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,6 +498,21 @@ mod tests {
         println!("is_system_dark_mode() = {is_dark}");
         // On user's machine AppsUseLightTheme is 0, so is_dark should be true
         assert!(is_dark);
+    }
+
+    #[test]
+    fn test_work_area_and_centering() {
+        let dpi = get_system_dpi();
+        println!("System DPI: {dpi} (scale: {})", dpi as f32 / 96.0);
+        let rect = get_active_work_area();
+        println!("Active work area: {rect:?}");
+        assert!(rect.right > rect.left);
+        assert!(rect.bottom > rect.top);
+
+        let [x, y] = get_centered_window_position(580.0, 680.0);
+        println!("Centered pos for 580x680: x={x}, y={y}");
+        assert!(x >= 0.0);
+        assert!(y >= 0.0);
     }
 }
 

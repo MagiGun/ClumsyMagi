@@ -13,6 +13,8 @@ pub struct CliOptions {
     pub elevated_relaunch: bool,
     /// Keep console window visible instead of hiding it by default
     pub show_console: bool,
+    /// Specific initial window position requested, e.g. from elevated relaunch
+    pub window_pos: Option<[f32; 2]>,
 }
 
 pub fn help_text() -> String {
@@ -149,6 +151,14 @@ pub fn parse(args: &[String], cfg: &mut AppConfig) -> Result<CliOptions, String>
             "filter" => cfg.filter = value.clone(),
             "quit-after" => {
                 opts.quit_after_secs = parse_num::<u64>(value).filter(|&v| v > 0);
+            }
+            "window-pos" => {
+                let parts: Vec<&str> = value.split(',').collect();
+                if parts.len() == 2 {
+                    if let (Ok(x), Ok(y)) = (parts[0].trim().parse::<f32>(), parts[1].trim().parse::<f32>()) {
+                        opts.window_pos = Some([x, y]);
+                    }
+                }
             }
             "theme" => {
                 cfg.theme = match value.to_ascii_lowercase().as_str() {
@@ -289,14 +299,22 @@ mod tests {
     #[test]
     fn parses_standalone_flags() {
         let mut cfg = AppConfig::default();
-        let args: Vec<String> = ["--auto-start", "--elevated-relaunch", "--show-console", "--drop"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let args: Vec<String> = [
+            "--auto-start",
+            "--elevated-relaunch",
+            "--show-console",
+            "--window-pos",
+            "450,280",
+            "--drop",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         let opts = parse(&args, &mut cfg).unwrap();
         assert!(opts.auto_start);
         assert!(opts.elevated_relaunch);
         assert!(opts.show_console);
+        assert_eq!(opts.window_pos, Some([450.0, 280.0]));
         assert!(cfg.module_config(crate::engine::modules::ModuleKind::Drop).enabled);
     }
 
