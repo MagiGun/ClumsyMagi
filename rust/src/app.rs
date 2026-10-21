@@ -49,6 +49,22 @@ pub struct ClumsyMagiApp {
     preset_window_open: bool,
     applied_theme: Option<Theme>,
     last_system_dark: Option<bool>,
+
+    // Process targeting
+    pub process_window_open: bool,
+    pub process_search: String,
+    pub process_list_cache: Vec<crate::process_target::ProcessInfo>,
+    pub last_process_refresh: Instant,
+    pub target_pid: Option<u32>,
+    pub target_process_name: Option<String>,
+    pub target_window_title: Option<String>,
+    pub target_auto_track: bool,
+    pub target_filter_tcp: bool,
+    pub target_filter_udp: bool,
+    pub target_filter_inbound: bool,
+    pub target_filter_outbound: bool,
+    pub last_auto_track_check: Instant,
+    pub only_games_tab: bool,
 }
 
 impl ClumsyMagiApp {
@@ -88,6 +104,20 @@ impl ClumsyMagiApp {
             preset_window_open: false,
             applied_theme: None,
             last_system_dark: None,
+            process_window_open: false,
+            process_search: String::new(),
+            process_list_cache: Vec::new(),
+            last_process_refresh: Instant::now() - Duration::from_secs(60),
+            target_pid: None,
+            target_process_name: None,
+            target_window_title: None,
+            target_auto_track: true,
+            target_filter_tcp: true,
+            target_filter_udp: true,
+            target_filter_inbound: true,
+            target_filter_outbound: true,
+            last_auto_track_check: Instant::now(),
+            only_games_tab: true,
         }
     }
 
@@ -155,6 +185,68 @@ impl ClumsyMagiApp {
             self.config_dirty = false;
         }
         self.last_config_save = Instant::now();
+    }
+
+    pub fn refresh_processes(&mut self) {
+        self.process_list_cache = crate::process_target::list_processes();
+        self.last_process_refresh = Instant::now();
+    }
+
+    pub fn open_process_picker(&mut self) {
+        self.refresh_processes();
+        self.process_window_open = true;
+    }
+
+    pub fn detach_target(&mut self) {
+        self.target_pid = None;
+        self.target_process_name = None;
+        self.target_window_title = None;
+        self.mark_dirty();
+    }
+
+    pub fn update_target_filter(&mut self, force_restart: bool) {
+        let Some(pid) = self.target_pid else { return; };
+        let sockets = crate::process_target::get_sockets_for_pid(pid);
+        let new_filter = crate::process_target::build_filter_for_sockets(
+            &sockets,
+            self.target_filter_tcp,
+            self.target_filter_udp,
+            self.target_filter_inbound,
+            self.target_filter_outbound,
+        );
+        let filter_changed = self.config.filter != new_filter;
+        if filter_changed || force_restart {
+            self.config.filter = new_filter;
+            self.mark_dirty();
+            self.preset_selected = usize::MAX;
+            if self.engine.as_ref().map(|e| e.is_running()).unwrap_or(false) {
+                self.stop_filtering();
+                self.start_filtering();
+            }
+        }
+    }
+
+    pub fn is_lag_active(&self) -> bool {
+        let running = self.engine.as_ref().map(|e| e.is_running()).unwrap_or(false);
+        let lag_enabled = self.config.module_config(crate::engine::modules::ModuleKind::Lag).enabled;
+        running && lag_enabled
+    }
+
+    pub fn quick_lag(&mut self) {
+        let lag_kind = crate::engine::modules::ModuleKind::Lag;
+        let lag_cfg = self.config.module_config_mut(lag_kind);
+        lag_cfg.enabled = true;
+        lag_cfg.delay_ms = Some(100);
+        lag_cfg.chance_percent = 100.0;
+        let delay = 100;
+        self.params[lag_kind.index()].enabled.store(true, Ordering::Relaxed);
+        self.params[lag_kind.index()].chance.store(crate::engine::params::CHANCE_MAX, Ordering::Relaxed);
+        self.params[lag_kind.index()].delay_ms.store(delay, Ordering::Relaxed);
+        self.mark_dirty();
+
+        if self.engine.as_ref().map(|e| !e.is_running()).unwrap_or(true) {
+            self.start_filtering();
+        }
     }
 
     fn apply_theme(&mut self, ctx: &egui::Context) {
@@ -233,11 +325,20 @@ impl eframe::App for ClumsyMagiApp {
         };
         ctx.request_repaint_after(repaint_delay);
 
+        // Periodic auto-track for targeted process sockets
+        if self.target_auto_track && self.target_pid.is_some() {
+            if self.last_auto_track_check.elapsed() >= Duration::from_millis(1000) {
+                self.update_target_filter(false);
+                self.last_auto_track_check = Instant::now();
+            }
+        }
+
         egui::Frame::central_panel(&ui.style()).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
             self.ui_main_content(ui);
         });
         self.ui_preset_window(&ctx);
+        self.ui_process_picker_window(&ctx);
     }
 }
 
@@ -343,6 +444,74 @@ impl ClumsyMagiApp {
                     }
                 });
             });
+
+            // Target Game / Process Bar
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Target:").strong());
+                if let Some(pid) = self.target_pid {
+                    let name = self.target_process_name.as_deref().unwrap_or("Program");
+                    let title = self.target_window_title.as_deref().unwrap_or("");
+                    let display_title = if title.is_empty() {
+                        format!("🎮 {name} (PID {pid})")
+                    } else {
+                        format!("🎮 {title} ({name})")
+                    };
+                    ui.label(egui::RichText::new(display_title).strong().color(ok_color(ui)));
+
+                    if ui.button("🎯 Change").on_hover_text("Select another game or process").clicked() {
+                        self.open_process_picker();
+                    }
+                    if ui.button("✕ Detach").on_hover_text("Clear process target and return to manual filter").clicked() {
+                        self.detach_target();
+                    }
+
+                    let lag_active = self.is_lag_active();
+                    let lag_text = if lag_active { "⚡ Lagging (100ms)" } else { "⚡ Quick Lag" };
+                    if ui.button(egui::RichText::new(lag_text).color(warn_color(ui)))
+                        .on_hover_text("Instantly configure 100ms Lag and start filtering this game")
+                        .clicked()
+                    {
+                        self.quick_lag();
+                    }
+                } else {
+                    if ui.button("🎯 Select Game / Process...")
+                        .on_hover_text("Select a running game, application, or window to filter its packets")
+                        .clicked()
+                    {
+                        self.open_process_picker();
+                    }
+                    ui.label(egui::RichText::new("Entire System / Manual Filter").weak());
+                }
+            });
+
+            // If a process is targeted, show socket controls
+            if self.target_pid.is_some() {
+                ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    let mut changed = false;
+                    ui.label("Packets:");
+                    if ui.checkbox(&mut self.target_filter_udp, "UDP (Game)").on_hover_text("Filter UDP game packets").changed() {
+                        changed = true;
+                    }
+                    if ui.checkbox(&mut self.target_filter_tcp, "TCP (Web/Chat)").on_hover_text("Filter TCP connections").changed() {
+                        changed = true;
+                    }
+                    ui.separator();
+                    if ui.checkbox(&mut self.target_filter_inbound, "In").on_hover_text("Filter inbound packets").changed() {
+                        changed = true;
+                    }
+                    if ui.checkbox(&mut self.target_filter_outbound, "Out").on_hover_text("Filter outbound packets").changed() {
+                        changed = true;
+                    }
+                    ui.separator();
+                    ui.checkbox(&mut self.target_auto_track, "Auto-track ports")
+                        .on_hover_text("Automatically update filter when the game joins a new server or binds new ports");
+
+                    if changed {
+                        self.update_target_filter(true);
+                    }
+                });
+            }
 
             // Filter Text Edit: full width
             let filter_edit = egui::TextEdit::singleline(&mut self.config.filter)
@@ -809,6 +978,157 @@ impl ClumsyMagiApp {
             });
         self.preset_window_open = open;
     }
+
+    // ---------------------------------------------------------------- process picker window
+
+    fn ui_process_picker_window(&mut self, ctx: &egui::Context) {
+        if !self.process_window_open {
+            return;
+        }
+        let mut open = self.process_window_open;
+        let mut should_close = false;
+        let mut selected_proc: Option<(u32, String, Option<String>)> = None;
+
+        egui::Window::new("🎯 Select Game or Application")
+            .open(&mut open)
+            .collapsible(false)
+            .default_size([520.0, 460.0])
+            .min_width(420.0)
+            .min_height(350.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                // Header / search controls
+                ui.horizontal(|ui| {
+                    ui.label("Search:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.process_search)
+                            .hint_text("Filter by name or window title...")
+                            .desired_width(220.0),
+                    );
+                    if ui.button("🔄 Refresh").on_hover_text("Refresh process list").clicked() {
+                        self.refresh_processes();
+                    }
+                });
+
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.only_games_tab, true, "🎮 Games & Windows");
+                    ui.selectable_value(&mut self.only_games_tab, false, "All Running Processes");
+                });
+
+                ui.separator();
+
+                // Refresh if cache is empty or older than 10 seconds
+                if self.process_list_cache.is_empty() || self.last_process_refresh.elapsed() >= Duration::from_secs(10) {
+                    self.refresh_processes();
+                }
+
+                let search = self.process_search.trim().to_lowercase();
+
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        let mut count = 0;
+                        for proc in &self.process_list_cache {
+                            if self.only_games_tab && !proc.is_likely_game {
+                                continue;
+                            }
+
+                            let matches_name = proc.name.to_lowercase().contains(&search);
+                            let matches_title = proc.window_title.as_ref().map(|t| t.to_lowercase().contains(&search)).unwrap_or(false);
+                            if !search.is_empty() && !matches_name && !matches_title {
+                                continue;
+                            }
+
+                            count += 1;
+                            let is_current = self.target_pid == Some(proc.pid);
+
+                            ui.group(|ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    let icon = if proc.window_title.is_some() {
+                                        "🎮"
+                                    } else if !proc.sockets.is_empty() {
+                                        "🌐"
+                                    } else {
+                                        "⚙"
+                                    };
+
+                                    ui.vertical(|ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new(icon).size(14.0));
+                                            let name_text = if let Some(title) = &proc.window_title {
+                                                format!("{title} ({})", proc.name)
+                                            } else {
+                                                proc.name.clone()
+                                            };
+                                            ui.label(egui::RichText::new(name_text).strong());
+                                            ui.label(egui::RichText::new(format!("PID {}", proc.pid)).weak());
+                                        });
+
+                                        // Sockets preview
+                                        if !proc.sockets.is_empty() {
+                                            let mut udp_ports: Vec<u16> = proc.sockets.iter().filter(|s| s.protocol == crate::process_target::SocketProtocol::Udp).map(|s| s.local_port).collect();
+                                            udp_ports.sort_unstable();
+                                            udp_ports.dedup();
+
+                                            let mut tcp_ports: Vec<u16> = proc.sockets.iter().filter(|s| s.protocol == crate::process_target::SocketProtocol::Tcp).map(|s| s.local_port).collect();
+                                            tcp_ports.sort_unstable();
+                                            tcp_ports.dedup();
+
+                                            let mut parts = Vec::new();
+                                            if !udp_ports.is_empty() {
+                                                let ports_str = udp_ports.iter().take(4).map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
+                                                let more = if udp_ports.len() > 4 { format!(" (+{} more)", udp_ports.len() - 4) } else { String::new() };
+                                                parts.push(format!("UDP: {ports_str}{more}"));
+                                            }
+                                            if !tcp_ports.is_empty() {
+                                                let ports_str = tcp_ports.iter().take(4).map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
+                                                let more = if tcp_ports.len() > 4 { format!(" (+{} more)", tcp_ports.len() - 4) } else { String::new() };
+                                                parts.push(format!("TCP: {ports_str}{more}"));
+                                            }
+                                            ui.label(egui::RichText::new(parts.join(" | ")).size(11.0).color(ok_color(ui)));
+                                        } else {
+                                            ui.label(egui::RichText::new("No active sockets yet (auto-tracks upon connection)").size(11.0).weak());
+                                        }
+                                    });
+
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        let btn_text = if is_current { "✓ Targeted" } else { "🎯 Target" };
+                                        if ui.button(btn_text).clicked() {
+                                            selected_proc = Some((proc.pid, proc.name.clone(), proc.window_title.clone()));
+                                            should_close = true;
+                                        }
+                                    });
+                                });
+                            });
+                        }
+
+                        if count == 0 {
+                            ui.add_space(20.0);
+                            ui.vertical_centered(|ui| {
+                                ui.label("No matching processes found.");
+                                if self.only_games_tab {
+                                    if ui.button("Show All Running Processes").clicked() {
+                                        self.only_games_tab = false;
+                                    }
+                                }
+                            });
+                        }
+                    });
+            });
+
+        if let Some((pid, name, window_title)) = selected_proc {
+            self.target_pid = Some(pid);
+            self.target_process_name = Some(name);
+            self.target_window_title = window_title;
+            self.update_target_filter(true);
+        }
+        if should_close {
+            open = false;
+        }
+        self.process_window_open = open;
+    }
 }
 
 // ---------------------------------------------------------------- helpers
@@ -911,6 +1231,38 @@ mod tests {
             app.apply_theme(&ctx);
             assert!(ctx.global_style().visuals.dark_mode);
         }
+    }
+
+    #[test]
+    fn test_process_targeting_and_quick_lag() {
+        let mut app = ClumsyMagiApp::new(
+            AppConfig::default(),
+            Err("WinDivert not loaded".to_string()),
+            false,
+        );
+
+        // 1. Initial state
+        assert!(app.target_pid.is_none());
+
+        // 2. Target a process
+        app.target_pid = Some(9999);
+        app.target_process_name = Some("game.exe".into());
+        app.target_window_title = Some("My Game".into());
+
+        // 3. Quick lag
+        app.quick_lag();
+        let lag_cfg = app.config.module_config(crate::engine::modules::ModuleKind::Lag);
+        assert!(lag_cfg.enabled);
+        assert_eq!(lag_cfg.delay_ms, Some(100));
+        assert_eq!(lag_cfg.chance_percent, 100.0);
+        let lag_param = &app.params[crate::engine::modules::ModuleKind::Lag.index()];
+        assert!(lag_param.enabled.load(Ordering::Relaxed));
+        assert_eq!(lag_param.delay_ms.load(Ordering::Relaxed), 100);
+
+        // 4. Detach
+        app.detach_target();
+        assert!(app.target_pid.is_none());
+        assert!(app.target_process_name.is_none());
     }
 }
 

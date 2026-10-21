@@ -7,6 +7,7 @@ mod config;
 mod engine;
 mod packet;
 mod platform;
+mod process_target;
 mod selftest;
 mod wd;
 

@@ -211,6 +211,12 @@ impl AppConfig {
             .unwrap_or_else(|| ModuleConfig::for_kind(kind))
     }
 
+    pub fn module_config_mut(&mut self, kind: ModuleKind) -> &mut ModuleConfig {
+        self.modules
+            .entry(kind.short_name().to_string())
+            .or_insert_with(|| ModuleConfig::for_kind(kind))
+    }
+
     /// Build fresh engine params from stored config.
     pub fn build_params(&self) -> Vec<Arc<ModuleParams>> {
         crate::engine::all_modules()
