@@ -165,18 +165,26 @@ impl ClumsyMagiApp {
         };
 
         if self.applied_theme != Some(self.config.theme) || self.last_system_dark != Some(is_dark) {
-            let visuals = if is_dark {
-                egui::Visuals::dark()
-            } else {
-                egui::Visuals::light()
-            };
-            ctx.set_visuals(visuals);
+            // Keep dark and light theme styles canonical to prevent cross-contamination
+            ctx.set_visuals_of(egui::Theme::Dark, egui::Visuals::dark());
+            ctx.set_visuals_of(egui::Theme::Light, egui::Visuals::light());
+
             let theme_pref = match self.config.theme {
-                Theme::System => egui::ThemePreference::System,
                 Theme::Dark => egui::ThemePreference::Dark,
                 Theme::Light => egui::ThemePreference::Light,
+                Theme::System => {
+                    if is_dark {
+                        egui::ThemePreference::Dark
+                    } else {
+                        egui::ThemePreference::Light
+                    }
+                }
             };
             ctx.set_theme(theme_pref);
+            ctx.options_mut(|o| {
+                o.fallback_theme = if is_dark { egui::Theme::Dark } else { egui::Theme::Light };
+            });
+
             self.applied_theme = Some(self.config.theme);
             self.last_system_dark = Some(is_dark);
         }
@@ -184,6 +192,10 @@ impl ClumsyMagiApp {
 }
 
 impl eframe::App for ClumsyMagiApp {
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        visuals.panel_fill.to_normalized_gamma_f32()
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
@@ -221,7 +233,10 @@ impl eframe::App for ClumsyMagiApp {
         };
         ctx.request_repaint_after(repaint_delay);
 
-        self.ui_main_content(ui);
+        egui::Frame::central_panel(&ui.style()).show(ui, |ui| {
+            ui.set_min_size(ui.available_size());
+            self.ui_main_content(ui);
+        });
         self.ui_preset_window(&ctx);
     }
 }
@@ -277,35 +292,25 @@ impl ClumsyMagiApp {
                 ui.label(egui::RichText::new("Filtering").strong());
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // 1. Theme selector (pinned to top-right)
-                    let current_theme_label = match self.config.theme {
+                    // 1. Theme toggle button: single click cycles Dark -> Light -> System -> Dark
+                    let (theme_icon, theme_label, next_theme, hover_text) = match self.config.theme {
+                        Theme::Dark => ("🌙", "Dark", Theme::Light, "Theme: Dark (click for Light)"),
+                        Theme::Light => ("☀", "Light", Theme::System, "Theme: Light (click for System)"),
                         Theme::System => {
                             if crate::platform::is_system_dark_mode() {
-                                "💻 System (Dark)"
+                                ("💻", "System", Theme::Dark, "Theme: System (matches Windows, currently Dark - click for Dark)")
                             } else {
-                                "💻 System (Light)"
+                                ("💻", "System", Theme::Dark, "Theme: System (matches Windows, currently Light - click for Dark)")
                             }
                         }
-                        Theme::Dark => "🌙 Dark",
-                        Theme::Light => "☀ Light",
                     };
-                    let mut chosen_theme = self.config.theme;
-                    egui::ComboBox::from_id_salt("theme_selector")
-                        .width(115.0)
-                        .selected_text(current_theme_label)
-                        .show_ui(ui, |ui| {
-                            let sys_label = if crate::platform::is_system_dark_mode() {
-                                "💻 System (Dark)"
-                            } else {
-                                "💻 System (Light)"
-                            };
-                            ui.selectable_value(&mut chosen_theme, Theme::System, sys_label);
-                            ui.selectable_value(&mut chosen_theme, Theme::Dark, "🌙 Dark");
-                            ui.selectable_value(&mut chosen_theme, Theme::Light, "☀ Light");
-                        });
-                    if chosen_theme != self.config.theme {
-                        self.config.theme = chosen_theme;
+                    if ui.button(format!("{theme_icon} {theme_label}"))
+                        .on_hover_text(hover_text)
+                        .clicked()
+                    {
+                        self.config.theme = next_theme;
                         self.mark_dirty();
+                        self.apply_theme(ui.ctx());
                         ui.ctx().request_repaint();
                     }
 
@@ -853,3 +858,59 @@ fn format_log_line(ev: &crate::engine::LogEvent) -> String {
         .unwrap_or_else(|| "engine".into());
     format!("{} [{module}] {}", format_unix_ms(ev.unix_ms), ev.text)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_theme_switching_cycle() {
+        let mut app = ClumsyMagiApp::new(
+            AppConfig::default(),
+            Err("WinDivert not loaded".to_string()),
+            false,
+        );
+        let ctx = egui::Context::default();
+
+        // 1. Dark mode
+        app.config.theme = Theme::Dark;
+        app.apply_theme(&ctx);
+        assert_eq!(ctx.theme(), egui::Theme::Dark);
+        assert!(ctx.global_style().visuals.dark_mode);
+
+        // 2. Light mode
+        app.config.theme = Theme::Light;
+        app.apply_theme(&ctx);
+        assert_eq!(ctx.theme(), egui::Theme::Light);
+        assert!(!ctx.global_style().visuals.dark_mode);
+
+        // 3. Switch back to Dark (must not be corrupted)
+        app.config.theme = Theme::Dark;
+        app.apply_theme(&ctx);
+        assert_eq!(ctx.theme(), egui::Theme::Dark);
+        assert!(ctx.global_style().visuals.dark_mode);
+
+        // 4. Switch to System
+        app.config.theme = Theme::System;
+        app.apply_theme(&ctx);
+        if crate::platform::is_system_dark_mode() {
+            assert_eq!(ctx.theme(), egui::Theme::Dark);
+            assert!(ctx.global_style().visuals.dark_mode);
+        } else {
+            assert_eq!(ctx.theme(), egui::Theme::Light);
+            assert!(!ctx.global_style().visuals.dark_mode);
+        }
+
+        // 5. Rapid 10x cycle to ensure complete stability
+        for _ in 0..10 {
+            app.config.theme = Theme::Light;
+            app.apply_theme(&ctx);
+            assert!(!ctx.global_style().visuals.dark_mode);
+
+            app.config.theme = Theme::Dark;
+            app.apply_theme(&ctx);
+            assert!(ctx.global_style().visuals.dark_mode);
+        }
+    }
+}
+
