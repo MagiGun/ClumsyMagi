@@ -52,6 +52,12 @@ fn main() {
         }
     };
 
+    // By default, hide the console window when running as a GUI application unless
+    // explicitly requested via --show-console. A UI button allows toggling it on demand.
+    if !cli.show_console {
+        platform::hide_console();
+    }
+
     // single instance guard; the elevated relaunch path retries while the old
     // (unelevated) instance is shutting down
     let mut guard = None;

@@ -11,6 +11,8 @@ pub struct CliOptions {
     pub quit_after_secs: Option<u64>,
     /// internal flag for the UAC relaunch path (retry single-instance)
     pub elevated_relaunch: bool,
+    /// Keep console window visible instead of hiding it by default
+    pub show_console: bool,
 }
 
 pub fn help_text() -> String {
@@ -21,6 +23,7 @@ pub fn help_text() -> String {
     s.push_str("Options are given as `--key value` pairs:\n\n");
     s.push_str("  --filter FILTER        set the capture filter\n");
     s.push_str("  --auto-start           start filtering immediately\n");
+    s.push_str("  --show-console         keep the console/cmd window visible\n");
     s.push_str("  --quit-after SECONDS   exit after SECONDS (handy for scripted runs)\n\n");
     for kind in crate::engine::all_modules() {
         let n = kind.short_name();
@@ -104,6 +107,18 @@ pub fn parse(args: &[String], cfg: &mut AppConfig) -> Result<CliOptions, String>
                 }
             }
             opts.elevated_relaunch = true;
+            ix += 1;
+            continue;
+        }
+        if key == "show-console" {
+            if let Some(val) = args.get(ix + 1) {
+                if let Some(b) = parse_bool(val) {
+                    opts.show_console = b;
+                    ix += 2;
+                    continue;
+                }
+            }
+            opts.show_console = true;
             ix += 1;
             continue;
         }
@@ -274,13 +289,14 @@ mod tests {
     #[test]
     fn parses_standalone_flags() {
         let mut cfg = AppConfig::default();
-        let args: Vec<String> = ["--auto-start", "--elevated-relaunch", "--drop"]
+        let args: Vec<String> = ["--auto-start", "--elevated-relaunch", "--show-console", "--drop"]
             .iter()
             .map(|s| s.to_string())
             .collect();
         let opts = parse(&args, &mut cfg).unwrap();
         assert!(opts.auto_start);
         assert!(opts.elevated_relaunch);
+        assert!(opts.show_console);
         assert!(cfg.module_config(crate::engine::modules::ModuleKind::Drop).enabled);
     }
 

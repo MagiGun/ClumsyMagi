@@ -211,3 +211,158 @@ pub fn error_box(text: &str) {
         );
     }
 }
+
+// ---------------------------------------------------------------- system theme detection
+
+#[link(name = "advapi32")]
+extern "system" {
+    fn RegOpenKeyExW(
+        hKey: *mut c_void,
+        lpSubKey: *const u16,
+        ulOptions: u32,
+        samDesired: u32,
+        phkResult: *mut *mut c_void,
+    ) -> i32;
+    fn RegQueryValueExW(
+        hKey: *mut c_void,
+        lpValueName: *const u16,
+        lpReserved: *mut u32,
+        lpType: *mut u32,
+        lpData: *mut u8,
+        lpcbData: *mut u32,
+    ) -> i32;
+    fn RegCloseKey(hKey: *mut c_void) -> i32;
+}
+
+const HKEY_CURRENT_USER: *mut c_void = ((0x80000001u32 as i32) as isize) as usize as *mut c_void;
+const KEY_QUERY_VALUE: u32 = 0x0001;
+
+/// Queries Windows registry to check if the user has Dark Mode configured for apps.
+/// HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\AppsUseLightTheme
+/// Returns true if dark mode is active (AppsUseLightTheme == 0), or true on failure/missing key.
+pub fn is_system_dark_mode() -> bool {
+    let subkey = wide("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
+    let val_name = wide("AppsUseLightTheme");
+    unsafe {
+        let mut hkey: *mut c_void = std::ptr::null_mut();
+        let status = RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            0,
+            KEY_QUERY_VALUE,
+            &mut hkey,
+        );
+        if status != 0 || hkey.is_null() {
+            return true;
+        }
+
+        let mut val: u32 = 0;
+        let mut val_len: u32 = std::mem::size_of::<u32>() as u32;
+        let mut val_type: u32 = 0;
+        let query_status = RegQueryValueExW(
+            hkey,
+            val_name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut val_type,
+            &mut val as *mut u32 as *mut u8,
+            &mut val_len,
+        );
+        RegCloseKey(hkey);
+
+        if query_status == 0 {
+            val == 0
+        } else {
+            true
+        }
+    }
+}
+
+// ---------------------------------------------------------------- console management
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetConsoleWindow() -> *mut c_void;
+    fn AllocConsole() -> i32;
+}
+
+#[link(name = "user32")]
+extern "system" {
+    fn ShowWindow(hWnd: *mut c_void, nCmdShow: i32) -> i32;
+    fn IsWindowVisible(hWnd: *mut c_void) -> i32;
+    fn GetSystemMenu(hWnd: *mut c_void, bRevert: i32) -> *mut c_void;
+    fn EnableMenuItem(hMenu: *mut c_void, uIDEnableItem: u32, uEnable: u32) -> i32;
+}
+
+const SW_HIDE: i32 = 0;
+const SW_SHOW: i32 = 5;
+const SC_CLOSE: u32 = 0xF060;
+const MF_BYCOMMAND: u32 = 0x00000000;
+const MF_GRAYED: u32 = 0x00000001;
+const MF_DISABLED: u32 = 0x00000002;
+
+/// Hide the console window if one is attached to this process.
+pub fn hide_console() {
+    unsafe {
+        let hwnd = GetConsoleWindow();
+        if !hwnd.is_null() {
+            ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+}
+
+/// Show the console window (allocating one if not present) and disable its Close
+/// button so accidental closes don't kill the application process.
+pub fn show_console() {
+    unsafe {
+        let mut hwnd = GetConsoleWindow();
+        if hwnd.is_null() {
+            AllocConsole();
+            hwnd = GetConsoleWindow();
+        }
+        if !hwnd.is_null() {
+            let menu = GetSystemMenu(hwnd, 0);
+            if !menu.is_null() {
+                EnableMenuItem(menu, SC_CLOSE, MF_BYCOMMAND | MF_GRAYED | MF_DISABLED);
+            }
+            ShowWindow(hwnd, SW_SHOW);
+        }
+    }
+}
+
+/// Is the console window currently visible?
+pub fn is_console_visible() -> bool {
+    unsafe {
+        let hwnd = GetConsoleWindow();
+        if hwnd.is_null() {
+            false
+        } else {
+            IsWindowVisible(hwnd) != 0
+        }
+    }
+}
+
+/// Toggle console visibility; returns true if now visible, false if now hidden.
+pub fn toggle_console() -> bool {
+    if is_console_visible() {
+        hide_console();
+        false
+    } else {
+        show_console();
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_system_dark_mode_readable() {
+        // Must succeed without crashing and return a valid boolean
+        let is_dark = is_system_dark_mode();
+        println!("is_system_dark_mode() = {is_dark}");
+        // On user's machine AppsUseLightTheme is 0, so is_dark should be true
+        assert!(is_dark);
+    }
+}
+

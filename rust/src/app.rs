@@ -48,6 +48,7 @@ pub struct ClumsyMagiApp {
     preset_name_edit: String,
     preset_window_open: bool,
     applied_theme: Option<Theme>,
+    last_system_dark: Option<bool>,
 }
 
 impl ClumsyMagiApp {
@@ -86,6 +87,7 @@ impl ClumsyMagiApp {
             preset_name_edit: String::new(),
             preset_window_open: false,
             applied_theme: None,
+            last_system_dark: None,
         }
     }
 
@@ -154,14 +156,21 @@ impl ClumsyMagiApp {
         }
         self.last_config_save = Instant::now();
     }
-}
 
-impl eframe::App for ClumsyMagiApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
+    fn apply_theme(&mut self, ctx: &egui::Context) {
+        let is_dark = match self.config.theme {
+            Theme::Dark => true,
+            Theme::Light => false,
+            Theme::System => crate::platform::is_system_dark_mode(),
+        };
 
-        // theme (only poke the context when the preference actually changed)
-        if self.applied_theme != Some(self.config.theme) {
+        if self.applied_theme != Some(self.config.theme) || self.last_system_dark != Some(is_dark) {
+            let visuals = if is_dark {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            };
+            ctx.set_visuals(visuals);
             let theme_pref = match self.config.theme {
                 Theme::System => egui::ThemePreference::System,
                 Theme::Dark => egui::ThemePreference::Dark,
@@ -169,7 +178,17 @@ impl eframe::App for ClumsyMagiApp {
             };
             ctx.set_theme(theme_pref);
             self.applied_theme = Some(self.config.theme);
+            self.last_system_dark = Some(is_dark);
         }
+    }
+}
+
+impl eframe::App for ClumsyMagiApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+
+        // theme (updates visuals and preferences when theme or system dark mode changes)
+        self.apply_theme(&ctx);
 
         // quit-after deadline (--quit-after)
         if let Some(deadline) = self.quit_deadline {
@@ -258,21 +277,57 @@ impl ClumsyMagiApp {
                 ui.label(egui::RichText::new("Filtering").strong());
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let next = match self.config.theme {
-                        Theme::Dark => Theme::Light,
-                        Theme::Light => Theme::System,
-                        Theme::System => Theme::Dark,
+                    // 1. Theme selector (pinned to top-right)
+                    let current_theme_label = match self.config.theme {
+                        Theme::System => {
+                            if crate::platform::is_system_dark_mode() {
+                                "💻 System (Dark)"
+                            } else {
+                                "💻 System (Light)"
+                            }
+                        }
+                        Theme::Dark => "🌙 Dark",
+                        Theme::Light => "☀ Light",
                     };
-                    let (icon, label) = match next {
-                        Theme::Light => ("☀", "Light"),
-                        Theme::Dark => ("🌙", "Dark"),
-                        Theme::System => ("💻", "System"),
-                    };
-                    if ui.button(format!("{icon} {label}")).on_hover_text("Toggle theme").clicked() {
-                        self.config.theme = next;
+                    let mut chosen_theme = self.config.theme;
+                    egui::ComboBox::from_id_salt("theme_selector")
+                        .width(115.0)
+                        .selected_text(current_theme_label)
+                        .show_ui(ui, |ui| {
+                            let sys_label = if crate::platform::is_system_dark_mode() {
+                                "💻 System (Dark)"
+                            } else {
+                                "💻 System (Light)"
+                            };
+                            ui.selectable_value(&mut chosen_theme, Theme::System, sys_label);
+                            ui.selectable_value(&mut chosen_theme, Theme::Dark, "🌙 Dark");
+                            ui.selectable_value(&mut chosen_theme, Theme::Light, "☀ Light");
+                        });
+                    if chosen_theme != self.config.theme {
+                        self.config.theme = chosen_theme;
                         self.mark_dirty();
+                        ui.ctx().request_repaint();
                     }
 
+                    // 2. Console toggle button
+                    let console_vis = crate::platform::is_console_visible();
+                    let (console_icon, console_label) = if console_vis {
+                        ("📟", "Hide Console")
+                    } else {
+                        ("📟", "Show Console")
+                    };
+                    if ui.button(format!("{console_icon} {console_label}"))
+                        .on_hover_text(if console_vis {
+                            "Hide the Windows command prompt / console window"
+                        } else {
+                            "Show the Windows command prompt / console window"
+                        })
+                        .clicked()
+                    {
+                        crate::platform::toggle_console();
+                    }
+
+                    // 3. Elevate button (visible only when not already running as Administrator)
                     if !self.elevated {
                         if ui.button(egui::RichText::new("🛡 Elevate").color(warn_color(ui))).on_hover_text("Restart as Administrator").clicked() {
                             let args = vec!["--elevated-relaunch".to_string()];
