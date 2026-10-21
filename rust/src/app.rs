@@ -238,10 +238,17 @@ impl ClumsyMagiApp {
         lag_cfg.enabled = true;
         lag_cfg.delay_ms = Some(100);
         lag_cfg.chance_percent = 100.0;
+        // User gets info fast (inbound 0ms delay), but sends out lagged packets
+        lag_cfg.inbound = false;
+        lag_cfg.outbound = true;
+
         let delay = 100;
-        self.params[lag_kind.index()].enabled.store(true, Ordering::Relaxed);
-        self.params[lag_kind.index()].chance.store(crate::engine::params::CHANCE_MAX, Ordering::Relaxed);
-        self.params[lag_kind.index()].delay_ms.store(delay, Ordering::Relaxed);
+        let lag_param = &self.params[lag_kind.index()];
+        lag_param.enabled.store(true, Ordering::Relaxed);
+        lag_param.direction.inbound.store(false, Ordering::Relaxed);
+        lag_param.direction.outbound.store(true, Ordering::Relaxed);
+        lag_param.chance.store(crate::engine::params::CHANCE_MAX, Ordering::Relaxed);
+        lag_param.delay_ms.store(delay, Ordering::Relaxed);
         self.mark_dirty();
 
         if self.engine.as_ref().map(|e| !e.is_running()).unwrap_or(true) {
@@ -513,17 +520,7 @@ impl ClumsyMagiApp {
                 });
             }
 
-            // Filter Text Edit: full width
-            let filter_edit = egui::TextEdit::singleline(&mut self.config.filter)
-                .hint_text("WinDivert filter expression, e.g. outbound and loopback")
-                .desired_width(f32::INFINITY);
-            let response = ui.add_enabled(!running, filter_edit);
-            if response.changed() {
-                self.mark_dirty();
-                self.preset_selected = usize::MAX;
-            }
-
-            // Controls Row: Start/Stop, Presets, Save
+            // Controls Row: Start/Stop, Presets, Save (placed above filter expression)
             ui.horizontal(|ui| {
                 let btn_text = if running { "Stop" } else { "Start" };
                 let btn_color = if running { error_color(ui) } else { ok_color(ui) };
@@ -541,18 +538,58 @@ impl ClumsyMagiApp {
 
                 ui.add_enabled_ui(!running, |ui| {
                     ui.label("Presets:");
-                    let preset_names: Vec<String> = self.config.presets.iter().map(|p| p.name.clone()).collect();
-                    let selected_text = if self.preset_selected < preset_names.len() {
-                        preset_names[self.preset_selected].clone()
+                    let custom_indices: Vec<usize> = self
+                        .config
+                        .presets
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, p)| !p.builtin)
+                        .map(|(i, _)| i)
+                        .collect();
+                    let builtin_indices: Vec<usize> = self
+                        .config
+                        .presets
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, p)| p.builtin)
+                        .map(|(i, _)| i)
+                        .collect();
+
+                    let selected_text = if self.preset_selected < self.config.presets.len() {
+                        let p = &self.config.presets[self.preset_selected];
+                        if !p.builtin {
+                            format!("⭐ {}", p.name)
+                        } else {
+                            p.name.clone()
+                        }
                     } else {
                         "Custom...".to_string()
                     };
+
                     egui::ComboBox::from_id_salt("presets")
                         .width(220.0)
                         .selected_text(selected_text)
                         .show_ui(ui, |ui| {
-                            for (i, name) in preset_names.iter().enumerate() {
-                                ui.selectable_value(&mut self.preset_selected, i, name);
+                            // Show custom presets at the top first
+                            if !custom_indices.is_empty() {
+                                ui.label(egui::RichText::new("⭐ Custom Presets").small().weak());
+                                for &idx in &custom_indices {
+                                    let name = &self.config.presets[idx].name;
+                                    if ui.selectable_value(&mut self.preset_selected, idx, format!("⭐ {name}")).clicked() {
+                                        self.config.filter = self.config.presets[idx].filter.clone();
+                                        self.mark_dirty();
+                                    }
+                                }
+                                ui.separator();
+                                ui.label(egui::RichText::new("Built-in Presets").small().weak());
+                            }
+
+                            for &idx in &builtin_indices {
+                                let name = &self.config.presets[idx].name;
+                                if ui.selectable_value(&mut self.preset_selected, idx, name).clicked() {
+                                    self.config.filter = self.config.presets[idx].filter.clone();
+                                    self.mark_dirty();
+                                }
                             }
                         });
 
@@ -572,6 +609,16 @@ impl ClumsyMagiApp {
                     }
                 });
             });
+
+            // Filter Text Edit: full width
+            let filter_edit = egui::TextEdit::singleline(&mut self.config.filter)
+                .hint_text("WinDivert filter expression, e.g. outbound and loopback")
+                .desired_width(f32::INFINITY);
+            let response = ui.add_enabled(!running, filter_edit);
+            if response.changed() {
+                self.mark_dirty();
+                self.preset_selected = usize::MAX;
+            }
 
             // Status message
             if let Err(e) = &self.filter_validation {
@@ -945,12 +992,12 @@ impl ClumsyMagiApp {
                         .add_enabled(can_save, egui::Button::new("Save"))
                         .clicked()
                     {
-                        self.config.presets.push(crate::config::Preset {
+                        self.config.presets.insert(0, crate::config::Preset {
                             name: self.preset_name_edit.trim().to_string(),
                             filter: self.config.filter.clone(),
                             builtin: false,
                         });
-                        self.preset_selected = self.config.presets.len() - 1;
+                        self.preset_selected = 0;
                         self.mark_dirty();
                         self.preset_window_open = false;
                     }
@@ -1249,14 +1296,18 @@ mod tests {
         app.target_process_name = Some("game.exe".into());
         app.target_window_title = Some("My Game".into());
 
-        // 3. Quick lag
+        // 3. Quick lag (outbound lag enabled, inbound lag disabled)
         app.quick_lag();
         let lag_cfg = app.config.module_config(crate::engine::modules::ModuleKind::Lag);
         assert!(lag_cfg.enabled);
         assert_eq!(lag_cfg.delay_ms, Some(100));
         assert_eq!(lag_cfg.chance_percent, 100.0);
+        assert!(!lag_cfg.inbound);
+        assert!(lag_cfg.outbound);
         let lag_param = &app.params[crate::engine::modules::ModuleKind::Lag.index()];
         assert!(lag_param.enabled.load(Ordering::Relaxed));
+        assert!(!lag_param.direction.inbound.load(Ordering::Relaxed));
+        assert!(lag_param.direction.outbound.load(Ordering::Relaxed));
         assert_eq!(lag_param.delay_ms.load(Ordering::Relaxed), 100);
 
         // 4. Detach

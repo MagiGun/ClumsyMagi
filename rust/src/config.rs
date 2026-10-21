@@ -27,6 +27,21 @@ pub struct Preset {
 pub fn builtin_presets() -> Vec<Preset> {
     vec![
         Preset {
+            name: "all sending packets (outbound)".into(),
+            filter: "outbound".into(),
+            builtin: true,
+        },
+        Preset {
+            name: "all receiving packets (inbound)".into(),
+            filter: "inbound".into(),
+            builtin: true,
+        },
+        Preset {
+            name: "all traffic (inbound or outbound)".into(),
+            filter: "inbound or outbound".into(),
+            builtin: true,
+        },
+        Preset {
             name: "localhost ipv4 all".into(),
             filter: "outbound and loopback".into(),
             builtin: true,
@@ -39,16 +54,6 @@ pub fn builtin_presets() -> Vec<Preset> {
         Preset {
             name: "localhost ipv4 udp".into(),
             filter: "udp and outbound and loopback".into(),
-            builtin: true,
-        },
-        Preset {
-            name: "all sending packets".into(),
-            filter: "outbound".into(),
-            builtin: true,
-        },
-        Preset {
-            name: "all receiving packets".into(),
-            filter: "inbound".into(),
             builtin: true,
         },
         Preset {
