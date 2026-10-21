@@ -5,6 +5,7 @@ mod app;
 mod cli;
 mod config;
 mod engine;
+mod icon;
 mod packet;
 mod platform;
 mod process_target;

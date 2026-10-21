@@ -6,6 +6,7 @@ use crate::config::{AppConfig, Theme};
 use crate::engine::modules::ModuleKind;
 use crate::engine::params::ModuleParams;
 use crate::engine::{EngineHandle, StatsSnapshot};
+use crate::icon::{theme_icon_color, ui_icon, ui_icon_size, Icon, IconButton};
 use crate::wd::WinDivertLib;
 use eframe::egui;
 use egui_plot::{Legend, Line, Plot, PlotPoints};
@@ -402,17 +403,17 @@ impl ClumsyMagiApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // 1. Theme toggle button: single click cycles Dark -> Light -> System -> Dark
                     let (theme_icon, theme_label, next_theme, hover_text) = match self.config.theme {
-                        Theme::Dark => ("🌙", "Dark", Theme::Light, "Theme: Dark (click for Light)"),
-                        Theme::Light => ("☀", "Light", Theme::System, "Theme: Light (click for System)"),
+                        Theme::Dark => (Icon::Moon, "Dark", Theme::Light, "Theme: Dark (click for Light)"),
+                        Theme::Light => (Icon::Sun, "Light", Theme::System, "Theme: Light (click for System)"),
                         Theme::System => {
                             if crate::platform::is_system_dark_mode() {
-                                ("💻", "System", Theme::Dark, "Theme: System (matches Windows, currently Dark - click for Dark)")
+                                (Icon::Monitor, "System", Theme::Dark, "Theme: System (matches Windows, currently Dark - click for Dark)")
                             } else {
-                                ("💻", "System", Theme::Dark, "Theme: System (matches Windows, currently Light - click for Dark)")
+                                (Icon::Monitor, "System", Theme::Dark, "Theme: System (matches Windows, currently Light - click for Dark)")
                             }
                         }
                     };
-                    if ui.button(format!("{theme_icon} {theme_label}"))
+                    if ui.add(IconButton::new(theme_icon, theme_label))
                         .on_hover_text(hover_text)
                         .clicked()
                     {
@@ -424,12 +425,8 @@ impl ClumsyMagiApp {
 
                     // 2. Console toggle button
                     let console_vis = crate::platform::is_console_visible();
-                    let (console_icon, console_label) = if console_vis {
-                        ("📟", "Hide Console")
-                    } else {
-                        ("📟", "Show Console")
-                    };
-                    if ui.button(format!("{console_icon} {console_label}"))
+                    let (console_icon, console_label) = (Icon::Console, if console_vis { "Hide Console" } else { "Show Console" });
+                    if ui.add(IconButton::new(console_icon, console_label))
                         .on_hover_text(if console_vis {
                             "Hide the Windows command prompt / console window"
                         } else {
@@ -442,7 +439,8 @@ impl ClumsyMagiApp {
 
                     // 3. Elevate button (visible only when not already running as Administrator)
                     if !self.elevated {
-                        if ui.button(egui::RichText::new("🛡 Elevate").color(warn_color(ui))).on_hover_text("Restart as Administrator").clicked() {
+                        let btn = IconButton::new(Icon::Shield, egui::RichText::new("Elevate").color(warn_color(ui)));
+                        if ui.add(btn).on_hover_text("Restart as Administrator").clicked() {
                             let mut args = vec!["--elevated-relaunch".to_string()];
                             if let Some(rect) = ui.ctx().input(|i| i.viewport().outer_rect) {
                                 args.push("--window-pos".to_string());
@@ -463,29 +461,36 @@ impl ClumsyMagiApp {
                     let name = self.target_process_name.as_deref().unwrap_or("Program");
                     let title = self.target_window_title.as_deref().unwrap_or("");
                     let display_title = if title.is_empty() {
-                        format!("🎮 {name} (PID {pid})")
+                        format!("{name} (PID {pid})")
                     } else {
-                        format!("🎮 {title} ({name})")
+                        format!("{title} ({name})")
                     };
+                    ui_icon(ui, Icon::Gamepad);
                     ui.label(egui::RichText::new(display_title).strong().color(ok_color(ui)));
 
-                    if ui.button("🎯 Change").on_hover_text("Select another game or process").clicked() {
+                    if ui.add(IconButton::new(Icon::Target, "Change"))
+                        .on_hover_text("Select another game or process")
+                        .clicked()
+                    {
                         self.open_process_picker();
                     }
-                    if ui.button("✕ Detach").on_hover_text("Clear process target and return to manual filter").clicked() {
+                    if ui.add(IconButton::new(Icon::Close, "Detach"))
+                        .on_hover_text("Clear process target and return to manual filter")
+                        .clicked()
+                    {
                         self.detach_target();
                     }
 
                     let lag_active = self.is_lag_active();
-                    let lag_text = if lag_active { "⚡ Lagging (100ms)" } else { "⚡ Quick Lag" };
-                    if ui.button(egui::RichText::new(lag_text).color(warn_color(ui)))
+                    let lag_text = if lag_active { "Lagging (100ms)" } else { "Quick Lag" };
+                    if ui.add(IconButton::new(Icon::Lightning, egui::RichText::new(lag_text).color(warn_color(ui))))
                         .on_hover_text("Instantly configure 100ms Lag and start filtering this game")
                         .clicked()
                     {
                         self.quick_lag();
                     }
                 } else {
-                    if ui.button("🎯 Select Game / Process...")
+                    if ui.add(IconButton::new(Icon::Target, "Select Game / Process..."))
                         .on_hover_text("Select a running game, application, or window to filter its packets")
                         .clicked()
                     {
@@ -562,7 +567,7 @@ impl ClumsyMagiApp {
                     let selected_text = if self.preset_selected < self.config.presets.len() {
                         let p = &self.config.presets[self.preset_selected];
                         if !p.builtin {
-                            format!("⭐ {}", p.name)
+                            format!("[Custom] {}", p.name)
                         } else {
                             p.name.clone()
                         }
@@ -576,13 +581,19 @@ impl ClumsyMagiApp {
                         .show_ui(ui, |ui| {
                             // Show custom presets at the top first
                             if !custom_indices.is_empty() {
-                                ui.label(egui::RichText::new("⭐ Custom Presets").small().weak());
+                                ui.horizontal(|ui| {
+                                    ui_icon_size(ui, Icon::Star, 12.0, theme_icon_color(ui));
+                                    ui.label(egui::RichText::new("Custom Presets").small().weak());
+                                });
                                 for &idx in &custom_indices {
-                                    let name = &self.config.presets[idx].name;
-                                    if ui.selectable_value(&mut self.preset_selected, idx, format!("⭐ {name}")).clicked() {
-                                        self.config.filter = self.config.presets[idx].filter.clone();
-                                        self.mark_dirty();
-                                    }
+                                    let name = self.config.presets[idx].name.clone();
+                                    ui.horizontal(|ui| {
+                                        ui_icon_size(ui, Icon::Star, 12.0, theme_icon_color(ui));
+                                        if ui.selectable_value(&mut self.preset_selected, idx, &name).clicked() {
+                                            self.config.filter = self.config.presets[idx].filter.clone();
+                                            self.mark_dirty();
+                                        }
+                                    });
                                 }
                                 ui.separator();
                                 ui.label(egui::RichText::new("Built-in Presets").small().weak());
@@ -626,15 +637,24 @@ impl ClumsyMagiApp {
 
             // Status message
             if let Err(e) = &self.filter_validation {
-                ui.colored_label(error_color(ui), format!("⚠ {e}"));
+                ui.horizontal(|ui| {
+                    ui_icon(ui, Icon::Warning);
+                    ui.colored_label(error_color(ui), e);
+                });
             } else if !self.status.is_empty() {
                 if self.status_error {
-                    ui.colored_label(error_color(ui), format!("⚠ {}", self.status));
+                    ui.horizontal(|ui| {
+                        ui_icon(ui, Icon::Warning);
+                        ui.colored_label(error_color(ui), &self.status);
+                    });
                 } else {
                     ui.label(&self.status);
                 }
             } else if !self.elevated {
-                ui.colored_label(warn_color(ui), "⚠ Not running as Administrator: WinDivert requires admin privileges to capture packets.");
+                ui.horizontal(|ui| {
+                    ui_icon(ui, Icon::Warning);
+                    ui.colored_label(warn_color(ui), "Not running as Administrator: WinDivert requires admin privileges to capture packets.");
+                });
             } else {
                 ui.label(egui::RichText::new("Notice: loopback packets must use 'outbound' criteria (e.g. 'udp and outbound and loopback').").weak().small());
             }
@@ -839,8 +859,8 @@ impl ClumsyMagiApp {
 
             // Header line with collapse button and stats summary
             ui.horizontal(|ui| {
-                let chevron = if self.show_log { "▾" } else { "▸" };
-                if ui.button(format!("{chevron} Activity")).clicked() {
+                let chevron_icon = if self.show_log { Icon::ChevronDown } else { Icon::ChevronRight };
+                if ui.add(IconButton::new(chevron_icon, "Activity")).clicked() {
                     self.show_log = !self.show_log;
                     self.mark_dirty();
                 }
@@ -1015,7 +1035,10 @@ impl ClumsyMagiApp {
                         continue;
                     }
                     ui.horizontal(|ui| {
-                        if ui.small_button("✕").clicked() {
+                        if ui.add(IconButton::icon_only(Icon::Close).min_size(egui::vec2(16.0, 16.0)))
+                            .on_hover_text("Delete preset")
+                            .clicked()
+                        {
                             to_delete = Some(i);
                         }
                         ui.label(&p.name);
@@ -1040,7 +1063,7 @@ impl ClumsyMagiApp {
         let mut should_close = false;
         let mut selected_proc: Option<(u32, String, Option<String>)> = None;
 
-        egui::Window::new("🎯 Select Game or Application")
+        egui::Window::new("Select Game or Application")
             .open(&mut open)
             .collapsible(false)
             .default_size([520.0, 460.0])
@@ -1056,14 +1079,17 @@ impl ClumsyMagiApp {
                             .hint_text("Filter by name or window title...")
                             .desired_width(220.0),
                     );
-                    if ui.button("🔄 Refresh").on_hover_text("Refresh process list").clicked() {
+                    if ui.add(IconButton::new(Icon::Refresh, "Refresh")).on_hover_text("Refresh process list").clicked() {
                         self.refresh_processes();
                     }
                 });
 
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.only_games_tab, true, "🎮 Games & Windows");
+                    ui_icon(ui, Icon::Gamepad);
+                    ui.selectable_value(&mut self.only_games_tab, true, "Games & Windows");
+                    ui.separator();
+                    ui_icon(ui, Icon::Gear);
                     ui.selectable_value(&mut self.only_games_tab, false, "All Running Processes");
                 });
 
@@ -1097,17 +1123,17 @@ impl ClumsyMagiApp {
                             ui.group(|ui| {
                                 ui.set_width(ui.available_width());
                                 ui.horizontal(|ui| {
-                                    let icon = if proc.window_title.is_some() {
-                                        "🎮"
+                                    let proc_icon = if proc.window_title.is_some() {
+                                        Icon::Gamepad
                                     } else if !proc.sockets.is_empty() {
-                                        "🌐"
+                                        Icon::WindowApp
                                     } else {
-                                        "⚙"
+                                        Icon::Gear
                                     };
 
                                     ui.vertical(|ui| {
                                         ui.horizontal(|ui| {
-                                            ui.label(egui::RichText::new(icon).size(14.0));
+                                            ui_icon(ui, proc_icon);
                                             let name_text = if let Some(title) = &proc.window_title {
                                                 format!("{title} ({})", proc.name)
                                             } else {
@@ -1145,8 +1171,12 @@ impl ClumsyMagiApp {
                                     });
 
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        let btn_text = if is_current { "✓ Targeted" } else { "🎯 Target" };
-                                        if ui.button(btn_text).clicked() {
+                                        let (btn_icon, btn_text) = if is_current {
+                                            (Icon::Checkmark, "Targeted")
+                                        } else {
+                                            (Icon::Target, "Target")
+                                        };
+                                        if ui.add(IconButton::new(btn_icon, btn_text)).clicked() {
                                             selected_proc = Some((proc.pid, proc.name.clone(), proc.window_title.clone()));
                                             should_close = true;
                                         }
